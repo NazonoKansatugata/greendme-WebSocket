@@ -2,9 +2,9 @@ const WebSocket = require('ws');
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-// クライアント管理用
-let controller = null;
-let gameScreen = null;
+// ユーザーIDごとにコントローラー・ゲーム画面を管理
+const controllers = new Map(); // userId => ws
+const gameScreens = new Map(); // userId => ws
 
 wss.on('connection', function connection(ws) {
   console.log('クライアントが接続しました');
@@ -14,26 +14,38 @@ wss.on('connection', function connection(ws) {
     try {
       const msg = JSON.parse(message);
       if (msg.type === 'register') {
-        if (msg.role === 'controller') {
-          controller = ws;
-          ws.role = 'controller';
-          console.log('コントローラー登録');
-        } else if (msg.role === 'game') {
-          gameScreen = ws;
-          ws.role = 'game';
-          console.log('ゲーム画面登録');
+        const userId = msg.userId;
+        if (!userId) {
+          ws.send(JSON.stringify({ type: 'register', status: 'error', message: 'userIdが必要です' }));
+          return;
         }
-        ws.send(JSON.stringify({ type: 'register', status: 'ok', role: msg.role }));
+        ws.userId = userId;
+        if (msg.role === 'controller') {
+          controllers.set(userId, ws);
+          ws.role = 'controller';
+          console.log(`コントローラー登録: userId=${userId}`);
+        } else if (msg.role === 'game') {
+          gameScreens.set(userId, ws);
+          ws.role = 'game';
+          console.log(`ゲーム画面登録: userId=${userId}`);
+        }
+        ws.send(JSON.stringify({ type: 'register', status: 'ok', role: msg.role, userId }));
         return;
       }
       // コントローラーからの操作をゲーム画面に転送
-      if (ws.role === 'controller' && gameScreen && gameScreen.readyState === WebSocket.OPEN) {
-        console.log('コントローラーからの指示:', msg.data); // 追加
-        gameScreen.send(JSON.stringify({ type: 'input', data: msg.data }));
+      if (ws.role === 'controller' && ws.userId) {
+        const gameScreen = gameScreens.get(ws.userId);
+        if (gameScreen && gameScreen.readyState === WebSocket.OPEN) {
+          console.log(`コントローラーからの指示(userId=${ws.userId}):`, msg.data);
+          gameScreen.send(JSON.stringify({ type: 'input', data: msg.data }));
+        }
       }
-      // ゲーム画面からの応答をコントローラーに転送（必要なら）
-      if (ws.role === 'game' && controller && controller.readyState === WebSocket.OPEN) {
-        controller.send(JSON.stringify({ type: 'game_update', data: msg.data }));
+      // ゲーム画面からの応答をコントローラーに転送
+      if (ws.role === 'game' && ws.userId) {
+        const controller = controllers.get(ws.userId);
+        if (controller && controller.readyState === WebSocket.OPEN) {
+          controller.send(JSON.stringify({ type: 'game_update', data: msg.data }));
+        }
       }
     } catch (e) {
       // 旧来のテキストメッセージ対応
@@ -42,10 +54,9 @@ wss.on('connection', function connection(ws) {
   });
 
   ws.on('close', function() {
-    if (ws === controller) controller = null;
-    if (ws === gameScreen) gameScreen = null;
+    // 切断時にuserIdで管理しているMapから削除
+    if (ws.role === 'controller' && ws.userId) controllers.delete(ws.userId);
+    if (ws.role === 'game' && ws.userId) gameScreens.delete(ws.userId);
     console.log('クライアントが切断されました');
   });
 });
-
-console.log('WebSocketサーバーが ws://localhost:8080 で起動しました');
